@@ -453,13 +453,30 @@ with btn_col:
                  else "Azure OpenAI nicht konfiguriert — siehe .env.example",
         )
 
-# Warnung bei doppeltem Aufruf am selben Tag
+# Passwortabfrage nach Klick
 if analyze_clicked and azure_configured:
-    if has_analysis_today():
-        st.session_state.llm_confirm_overwrite = True
-        st.rerun()
-    else:
-        st.session_state.llm_run_now = True
+    st.session_state.llm_ask_password = True
+
+if st.session_state.get("llm_ask_password") and azure_configured:
+    st.info("🔐 Bitte Passwort für die KI-Analyse eingeben:")
+    pw = st.text_input("Passwort", type="password", key="llm_password")
+    pw_cols = st.columns([1, 1, 4])
+    with pw_cols[0]:
+        if st.button("Bestätigen", type="primary"):
+            if pw == os.environ.get("LLM_ANALYSIS_PASSWORD", ""):
+                st.session_state.llm_ask_password = False
+                # Weiter zur Überschreib-Prüfung
+                if has_analysis_today():
+                    st.session_state.llm_confirm_overwrite = True
+                else:
+                    st.session_state.llm_run_now = True
+                st.rerun()
+            else:
+                st.error("❌ Falsches Passwort.")
+    with pw_cols[1]:
+        if st.button("Abbrechen"):
+            st.session_state.llm_ask_password = False
+            st.rerun()
 
 if st.session_state.get("llm_confirm_overwrite") and azure_configured:
     st.warning("Heute wurde bereits eine KI-Analyse durchgeführt. Erneut ausführen und überschreiben?")
