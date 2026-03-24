@@ -33,7 +33,7 @@ from collectors.llm_analysis import (
 
 # ── Seitenkonfiguration ────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Heizöl-Dashboard Freudenberg",
+    page_title="Heizöl-Dashboard",
     page_icon="🛢️",
     layout="wide",
 )
@@ -186,7 +186,7 @@ if best_local is not None and best_local <= alarm_threshold:
     )
 
 # ── Titel ──────────────────────────────────────────────────────────────────────
-st.title(f"🛢️ Heizöl-Dashboard — PLZ {PLZ}")
+st.title(f"🛢️ Tobis Heizöl-Dashboard — PLZ {PLZ}")
 st.caption(
     "Drei-Ebenen-Analyse: Globaler Frühindikator → Nationaler Marktpreis → "
     "Lokale Händler. Alle Preise für Standard-Heizöl, Abnahmemenge 3.000 Liter."
