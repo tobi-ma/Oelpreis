@@ -18,7 +18,6 @@ from plotly.subplots import make_subplots
 from datetime import datetime, date
 import json
 import os
-import csv
 
 from dotenv import load_dotenv
 load_dotenv(override=True)
@@ -30,6 +29,7 @@ from collectors.llm_analysis import (
     run_llm_analysis, save_analysis, load_all_analyses,
     has_analysis_today, get_latest_analysis,
 )
+from collectors import db
 
 # ── Seitenkonfiguration ────────────────────────────────────────────────────────
 st.set_page_config(
@@ -37,6 +37,13 @@ st.set_page_config(
     page_icon="🛢️",
     layout="wide",
 )
+
+# Schema sicherstellen (idempotent, einmal pro App-Start)
+try:
+    db.init_schema()
+except Exception as _db_err:
+    st.error(f"DB-Verbindung fehlgeschlagen: {_db_err}")
+    st.stop()
 
 # ── Hilfsfunktionen ───────────────────────────────────────────────────────────
 
@@ -115,27 +122,13 @@ def buy_recommendation(brent_trend: str, national_df: pd.DataFrame, best_local: 
 
 def initialize_plz_history(plz: str, liters: int) -> None:
     """
-    Stelle sicher, dass die PLZ-spezifische History-Datei existiert.
-    Falls nicht: Erstelle sie mit leerem Header.
-    (Tägliche Updates kommen von collect_daily.py)
+    Registriert die PLZ in Neon (heizoel.tracked_plzs), damit collect_daily.py
+    sie beim nächsten Lauf mitsammelt. Idempotent.
     """
-    data_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(data_dir, exist_ok=True)
-
-    plz_history_file = os.path.join(data_dir, f"history_plz_{plz}.csv")
-
-    # Wenn Datei existiert: Fertig
-    if os.path.exists(plz_history_file):
-        return
-
-    # Sonst: Erstelle leere Datei mit Header
     try:
-        fieldnames = ["date", "best_local_ct_per_liter", "top_3_dealers"]
-        with open(plz_history_file, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
+        db.register_plz(plz)
     except Exception as e:
-        st.warning(f"Konnte Datei für PLZ {plz} nicht erstellen: {e}")
+        st.warning(f"Konnte PLZ {plz} nicht in DB registrieren: {e}")
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -729,66 +722,65 @@ with st.expander("Preisverlauf: Beste lokale Angebote (Zeitreihe)", expanded=Fal
         """
     )
 
-    # Lade globale Daten (Brent + National)
-    global_hist_file = os.path.join(os.path.dirname(__file__), "data", "history_global.csv")
-    # Lade PLZ-spezifische Daten
-    plz_hist_file = os.path.join(os.path.dirname(__file__), "data", f"history_plz_{PLZ}.csv")
+    # Lade Daten aus Neon Postgres
+    plz_rows = db.load_local_prices(PLZ)
+    df_plz = pd.DataFrame(plz_rows)
 
-    if os.path.exists(plz_hist_file):
-        df_plz = pd.read_csv(plz_hist_file)
-        df_plz = df_plz[df_plz["best_local_ct_per_liter"] != ""].copy()
+    if not df_plz.empty:
+        df_plz["date"] = pd.to_datetime(df_plz["date"])
+        df_plz["best_local_ct_per_liter"] = pd.to_numeric(
+            df_plz["best_local_ct_per_liter"], errors="coerce"
+        )
+        df_plz = df_plz.dropna(subset=["best_local_ct_per_liter"]).sort_values("date")
 
-        if not df_plz.empty:
-            df_plz["date"] = pd.to_datetime(df_plz["date"])
-            df_plz["best_local_ct_per_liter"] = pd.to_numeric(df_plz["best_local_ct_per_liter"], errors="coerce")
-            df_plz = df_plz.dropna(subset=["best_local_ct_per_liter"]).sort_values("date")
-
-            # Lade nationale Daten zum Vergleich
-            df_national = None
-            if os.path.exists(global_hist_file):
-                df_national = pd.read_csv(global_hist_file)
-                df_national["date"] = pd.to_datetime(df_national["date"])
-                df_national["national_ct_per_liter"] = pd.to_numeric(df_national["national_ct_per_liter"], errors="coerce")
-                df_national = df_national.dropna(subset=["national_ct_per_liter"]).sort_values("date")
-
-            if not df_plz.empty:
-                fig_hist = go.Figure()
-                fig_hist.add_trace(go.Scatter(
-                    x=df_plz["date"], y=df_plz["best_local_ct_per_liter"],
-                    mode="lines+markers", name=f"Beste lokal (PLZ {PLZ})",
-                    line=dict(color="#27ae60", width=2),
-                    hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} ct/L<extra></extra>",
-                ))
-                if df_national is not None:
-                    fig_hist.add_trace(go.Scatter(
-                        x=df_national["date"], y=df_national["national_ct_per_liter"],
-                        mode="lines", name="Bundesdurchschnitt",
-                        line=dict(color="#3498db", width=1, dash="dot"),
-                        hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} ct/L<extra></extra>",
-                    ))
-                fig_hist.update_layout(
-                    height=350, margin=dict(l=0, r=0, t=10, b=50),
-                    yaxis_title="ct/Liter",
-                    xaxis=dict(type="date", dtick="1d", title="Datum"),
-                    legend=dict(orientation="h", yanchor="top", y=0.99, xanchor="left", x=0.01),
-                    hovermode="x unified",
-                )
-                st.plotly_chart(fig_hist, width='stretch')
-
-                # Statistik
-                if len(df_plz) > 1:
-                    min_price = df_plz["best_local_ct_per_liter"].min()
-                    max_price = df_plz["best_local_ct_per_liter"].max()
-                    avg_price = df_plz["best_local_ct_per_liter"].mean()
-                    current_price = df_plz["best_local_ct_per_liter"].iloc[-1]
-                    st.caption(
-                        f"📊 Min: **{min_price:.2f}** ct/L | Ø: **{avg_price:.2f}** ct/L | "
-                        f"Max: **{max_price:.2f}** ct/L | Jetzt: **{current_price:.2f}** ct/L"
-                    )
-            else:
-                st.info(f"Noch keine Preisverlauf-Daten für PLZ {PLZ} vorhanden. Kommt täglich hinzu!")
+    if not df_plz.empty:
+        # Nationaler Vergleich
+        global_rows = db.load_global_prices()
+        df_national = pd.DataFrame(global_rows) if global_rows else None
+        if df_national is not None and not df_national.empty:
+            df_national["date"] = pd.to_datetime(df_national["date"])
+            df_national["national_ct_per_liter"] = pd.to_numeric(
+                df_national["national_ct_per_liter"], errors="coerce"
+            )
+            df_national = df_national.dropna(
+                subset=["national_ct_per_liter"]
+            ).sort_values("date")
         else:
-            st.info(f"Noch keine Preisverlauf-Daten für PLZ {PLZ} vorhanden. Kommt täglich hinzu!")
+            df_national = None
+
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Scatter(
+            x=df_plz["date"], y=df_plz["best_local_ct_per_liter"],
+            mode="lines+markers", name=f"Beste lokal (PLZ {PLZ})",
+            line=dict(color="#27ae60", width=2),
+            hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} ct/L<extra></extra>",
+        ))
+        if df_national is not None and not df_national.empty:
+            fig_hist.add_trace(go.Scatter(
+                x=df_national["date"], y=df_national["national_ct_per_liter"],
+                mode="lines", name="Bundesdurchschnitt",
+                line=dict(color="#3498db", width=1, dash="dot"),
+                hovertemplate="%{x|%d.%m.%Y}: %{y:.2f} ct/L<extra></extra>",
+            ))
+        fig_hist.update_layout(
+            height=350, margin=dict(l=0, r=0, t=10, b=50),
+            yaxis_title="ct/Liter",
+            xaxis=dict(type="date", dtick="1d", title="Datum"),
+            legend=dict(orientation="h", yanchor="top", y=0.99, xanchor="left", x=0.01),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_hist, width='stretch')
+
+        # Statistik
+        if len(df_plz) > 1:
+            min_price = df_plz["best_local_ct_per_liter"].min()
+            max_price = df_plz["best_local_ct_per_liter"].max()
+            avg_price = df_plz["best_local_ct_per_liter"].mean()
+            current_price = df_plz["best_local_ct_per_liter"].iloc[-1]
+            st.caption(
+                f"📊 Min: **{min_price:.2f}** ct/L | Ø: **{avg_price:.2f}** ct/L | "
+                f"Max: **{max_price:.2f}** ct/L | Jetzt: **{current_price:.2f}** ct/L"
+            )
     else:
         st.info(f"Noch keine Preisverlauf-Daten für PLZ {PLZ} vorhanden. Kommt täglich hinzu!")
 

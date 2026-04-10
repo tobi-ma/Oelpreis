@@ -4,7 +4,8 @@ LLM-gestützte Fundamentalanalyse des Ölmarkts via Azure OpenAI.
 Ruft ein LLM auf, das die aktuelle geopolitische Lage, Angebots-/Nachfragesituation
 und relevante Ereignisse analysiert und eine strukturierte Einschätzung zurückgibt.
 
-Ergebnisse werden pro Tag in data/llm_analyses.json persistiert.
+Ergebnisse werden pro Tag in Neon Postgres (Tabelle heizoel.llm_analyses)
+persistiert, damit sie Streamlit-Cloud-Restarts überleben.
 """
 
 import json
@@ -13,9 +14,6 @@ import requests as _requests
 from datetime import date, datetime
 
 from openai import OpenAI
-
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
-ANALYSES_FILE = os.path.join(DATA_DIR, "llm_analyses.json")
 
 SYSTEM_PROMPT = """\
 Du bist ein Energie-Marktanalyst, spezialisiert auf den europäischen Heizölmarkt.
@@ -176,39 +174,21 @@ def run_llm_analysis(
 
 
 def save_analysis(analysis: dict) -> None:
-    """Speichert eine Analyse in die JSON-Datei (eine pro Tag, überschreibbar)."""
-    os.makedirs(DATA_DIR, exist_ok=True)
-
-    all_analyses = load_all_analyses()
-
-    today = analysis.get("_meta", {}).get("date", date.today().isoformat())
-
-    # Vorhandenen Eintrag für heute ersetzen
-    all_analyses = [a for a in all_analyses if a.get("_meta", {}).get("date") != today]
-    all_analyses.append(analysis)
-
-    # Nach Datum sortieren (neueste zuerst)
-    all_analyses.sort(key=lambda a: a.get("_meta", {}).get("date", ""), reverse=True)
-
-    with open(ANALYSES_FILE, "w", encoding="utf-8") as f:
-        json.dump(all_analyses, f, ensure_ascii=False, indent=2)
+    """Speichert eine Analyse in Neon Postgres (upsert nach Datum)."""
+    from collectors import db
+    db.save_llm_analysis(analysis)
 
 
 def load_all_analyses() -> list[dict]:
-    """Lädt alle gespeicherten Analysen."""
-    if not os.path.exists(ANALYSES_FILE):
-        return []
-    with open(ANALYSES_FILE, encoding="utf-8") as f:
-        return json.load(f)
+    """Lädt alle gespeicherten Analysen aus Neon Postgres (neueste zuerst)."""
+    from collectors import db
+    return db.load_all_llm_analyses()
 
 
 def has_analysis_today() -> bool:
     """Prüft ob heute bereits eine Analyse erstellt wurde."""
-    today = date.today().isoformat()
-    return any(
-        a.get("_meta", {}).get("date") == today
-        for a in load_all_analyses()
-    )
+    from collectors import db
+    return db.has_llm_analysis_today()
 
 
 def get_latest_analysis() -> dict | None:
